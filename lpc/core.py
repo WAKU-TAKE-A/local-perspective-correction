@@ -320,6 +320,65 @@ def _numeric_jacobian(params: np.ndarray, measurements: list[Measurement],
 
 
 # ---------------------------------------------------------------------------
+# Orientation canonicalization
+# ---------------------------------------------------------------------------
+
+def canonicalize_orientation(
+    H: np.ndarray, measurements: list[Measurement]
+) -> tuple[np.ndarray, bool]:
+    """Fix the mirror and rotation gauge of an estimated homography.
+
+    The residuals are invariant under any similarity transform of the
+    plane, and also under a reflection (the mirror ambiguity, spec
+    section 6.4), so the optimizer may return a mirrored and arbitrarily
+    rotated plane.  For display this must be pinned down:
+
+    - warp_image() draws the plane with X to the right and Y up, while
+      image coordinates have Y down.  A non-mirrored result therefore
+      needs mean det(J_H) < 0 over the measurement points.  If the mean
+      determinant is positive, a plane reflection (X -> -X) is composed,
+      which leaves every residual unchanged.
+    - The plane is then rotated so that the first direction group's
+      mean direction points along -Y in plane coordinates, i.e. it
+      appears vertical and downward on screen, as in the input image.
+
+    Returns (canonicalized H, True if a mirror correction was applied).
+    """
+    dets = [float(np.linalg.det(jacobian(H, m.q))) for m in measurements]
+    mirror_corrected = False
+    if float(np.mean(dets)) > 0:
+        H = np.diag([-1.0, 1.0, 1.0]) @ H
+        mirror_corrected = True
+
+    group_ids = sorted({m.group_id for m in measurements})
+    if group_ids:
+        u = _group_plane_direction(H, measurements, group_ids[0])
+        if u is not None:
+            target = np.array([0.0, -1.0])
+            # Rotation R with R @ u == target (both are unit vectors):
+            # cos(phi) = u . target, sin(phi) = u_x*target_y - u_y*target_x.
+            cosang = float(np.clip(u @ target, -1.0, 1.0))
+            sinang = float(u[0] * target[1] - u[1] * target[0])
+            R = np.array([[cosang, -sinang], [sinang, cosang]])
+            S = np.eye(3)
+            S[:2, :2] = R
+            H = S @ H
+            # The direction arrows of the measurements are a convention
+            # (an element has no inherent arrow), so the result may still
+            # be upside down.  Break the 180-degree tie with the point
+            # positions: on screen, points should lie roughly where they
+            # lie in the input image.
+            P = np.array([apply_homography(H, m.q) for m in measurements])
+            Q = np.array([m.q for m in measurements], dtype=float)
+            disp = np.column_stack([P[:, 0], -P[:, 1]])
+            score = float(np.sum((disp - disp.mean(axis=0))
+                                 * (Q - Q.mean(axis=0))))
+            if score < 0:
+                H = np.diag([-1.0, -1.0, 1.0]) @ H
+    return H, mirror_corrected
+
+
+# ---------------------------------------------------------------------------
 # Estimation
 # ---------------------------------------------------------------------------
 
@@ -335,6 +394,7 @@ class EstimateResult:
     jacobian_rank: int = 0
     jacobian_condition: float = float("inf")
     identifiable: bool = False
+    mirror_corrected: bool = False
 
 
 def estimate_homography(measurements: list[Measurement],
@@ -376,6 +436,9 @@ def estimate_homography(measurements: list[Measurement],
         [params[3], params[4], params[5]],
         [params[6], params[7], 1.0],
     ])
+    H, mirror_corrected = canonicalize_orientation(H, measurements)
+    params = np.array([H[0, 0], H[0, 1], H[0, 2], H[1, 0], H[1, 1], H[1, 2],
+                       H[2, 0], H[2, 1]])
     rel = np.array([(local_scale(H, m.q, m.t) - m.resolution) / m.resolution
                     for m in measurements])
     per_group: dict[str, float] = {}
@@ -405,6 +468,7 @@ def estimate_homography(measurements: list[Measurement],
         jacobian_rank=rank,
         jacobian_condition=condition,
         identifiable=identifiable,
+        mirror_corrected=mirror_corrected,
     )
 
 

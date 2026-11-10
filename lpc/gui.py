@@ -443,6 +443,12 @@ class App(tb.Window):
         H = result.H
         if not quiet:
             self.log(f"推定完了（θ = {theta:.1f}°、測定点 {len(measurements)} 点）")
+            if not quiet:
+                if result.mirror_corrected:
+                    self.log("向きを正規化しました（鏡像の解だったため左右を反転し、"
+                             "第1方向群が縦になるよう回転を合わせました）")
+                else:
+                    self.log("向きを正規化しました（第1方向群が縦になるよう回転を合わせました）")
             self.log("H =\n" + "\n".join(
                 "  [" + ", ".join(f"{v: .6f}" for v in row) + "]" for row in H))
         self.log(f"残差 RMS（相対）= {result.rms_relative_residual:.4%}、"
