@@ -131,6 +131,107 @@ def check_measurements(measurements: list[Measurement]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Direction derivation
+# ---------------------------------------------------------------------------
+
+def _line_direction(points: np.ndarray) -> np.ndarray | None:
+    """Direction of the straight line through points (PCA first axis)."""
+    if len(points) < 2:
+        return None
+    centered = points - points.mean(axis=0)
+    if np.linalg.norm(centered) < 1e-9:
+        return None
+    _, _, vt = np.linalg.svd(centered, full_matrices=False)
+    d = vt[0]
+    n = np.linalg.norm(d)
+    return d / n if n > 0 else None
+
+
+def _vanishing_point(lines: list[tuple[np.ndarray, np.ndarray]]) -> np.ndarray | None:
+    """Least-squares intersection of lines given as (point, direction)."""
+    if len(lines) < 2:
+        return None
+    A = np.zeros((2, 2))
+    b = np.zeros(2)
+    for p, d in lines:
+        P = np.eye(2) - np.outer(d, d)
+        A += P
+        b += P @ p
+    try:
+        if abs(np.linalg.det(A)) < 1e-12:
+            return None
+        return np.linalg.solve(A, b)
+    except np.linalg.LinAlgError:
+        return None
+
+
+def fill_directions(items: list[dict]) -> tuple[list[dict], dict[str, int]]:
+    """Fill missing measurement directions automatically.
+
+    Each item is a dict with keys x, y, element_id, group_id and optional
+    dir_x / dir_y (None or missing means "not given").  Derivation order:
+
+    1. An element with two or more points lies on a straight image line,
+       whose direction is the measurement direction for all its points.
+    2. A single-point element without a given direction uses the
+       direction toward the vanishing point of its direction group,
+       computed from the lines of the other elements in the group.
+    3. A given direction is used as-is when neither applies.
+
+    Returns (filled items, counts per method).  Raises
+    InsufficientDataError when a direction cannot be determined.
+    """
+    by_element: dict[str, list[int]] = {}
+    for i, it in enumerate(items):
+        by_element.setdefault(str(it["element_id"]), []).append(i)
+
+    line_dir: dict[str, np.ndarray] = {}
+    for eid, idxs in by_element.items():
+        pts = np.array([[items[i]["x"], items[i]["y"]] for i in idxs], dtype=float)
+        d = _line_direction(pts)
+        if d is not None:
+            line_dir[eid] = d
+
+    # Vanishing point per group, from element lines of that group.
+    group_lines: dict[str, list[tuple[np.ndarray, np.ndarray]]] = {}
+    for eid, d in line_dir.items():
+        idxs = by_element[eid]
+        rep = items[idxs[0]]
+        group_lines.setdefault(str(rep["group_id"]), []).append(
+            (np.array([rep["x"], rep["y"]], dtype=float), d))
+    group_vp = {gid: _vanishing_point(lines) for gid, lines in group_lines.items()}
+
+    counts = {"line": 0, "vanishing_point": 0, "given": 0}
+    filled: list[dict] = []
+    for i, it in enumerate(items):
+        out = dict(it)
+        eid = str(it["element_id"])
+        gid = str(it["group_id"])
+        given = it.get("dir_x") is not None and it.get("dir_y") is not None
+        if eid in line_dir:
+            d = line_dir[eid]
+            out["dir_x"], out["dir_y"] = float(d[0]), float(d[1])
+            counts["line"] += 1
+        elif given:
+            out["dir_x"], out["dir_y"] = float(it["dir_x"]), float(it["dir_y"])
+            counts["given"] += 1
+        else:
+            vp = group_vp.get(gid)
+            q = np.array([it["x"], it["y"]], dtype=float)
+            if vp is not None and np.linalg.norm(vp - q) > 1e-6:
+                d = (vp - q) / np.linalg.norm(vp - q)
+                out["dir_x"], out["dir_y"] = float(d[0]), float(d[1])
+                counts["vanishing_point"] += 1
+            else:
+                raise InsufficientDataError(
+                    f"要素 {eid} の測定方向を決められません。その要素に2点以上を入れるか、"
+                    "dir_x / dir_y を指定してください。"
+                )
+        filled.append(out)
+    return filled, counts
+
+
+# ---------------------------------------------------------------------------
 # Residuals
 # ---------------------------------------------------------------------------
 

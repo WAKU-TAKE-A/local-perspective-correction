@@ -28,6 +28,7 @@ from .core import (
     InsufficientDataError,
     Measurement,
     estimate_homography,
+    fill_directions,
     warp_image,
 )
 from .simulate import make_scene
@@ -149,6 +150,8 @@ class App(tb.Window):
             v = tk.StringVar()
             self.entry_vars[c] = v
             tb.Entry(entry_row, textvariable=v, width=7).pack(side="left", padx=1)
+        tb.Label(frame, text="dir_x / dir_y は空欄で構いません（同じ要素の点から自動計算します）",
+                 font=("", 8)).pack(anchor="w", pady=(2, 0))
         btn_row = tb.Frame(frame)
         btn_row.pack(fill="x", pady=(6, 0))
         tb.Button(btn_row, text="追加", command=self.on_add_row).pack(side="left")
@@ -260,13 +263,17 @@ class App(tb.Window):
         vals = {c: v.get().strip() for c, v in self.entry_vars.items()}
         try:
             float(vals["x"]); float(vals["y"]); float(vals["period"])
-            float(vals["dirx"]); float(vals["diry"])
             if float(vals["period"]) <= 0:
                 raise ValueError
             if not vals["element"] or not vals["group"]:
                 raise ValueError
+            if (vals["dirx"] == "") != (vals["diry"] == ""):
+                raise ValueError
+            if vals["dirx"] != "":
+                float(vals["dirx"]); float(vals["diry"])
         except ValueError:
-            self.error("入力行が不正です。x, y, 周期px, dir_x, dir_y は数値、周期は正の値、要素と群は必須です。")
+            self.error("入力行が不正です。x, y, 周期px は数値で周期は正の値、要素と群は必須です。"
+                       "dir_x / dir_y は空欄か、両方とも数値にしてください。")
             return
         self._insert_row(vals)
         self.sample_truth = None
@@ -302,12 +309,22 @@ class App(tb.Window):
         try:
             with open(path, newline="", encoding="utf-8-sig") as f:
                 reader = csv.DictReader(f)
-                required = {"x", "y", "period", "element", "group", "dirx", "diry"}
+                required = {"x", "y", "period", "element", "group"}
                 if reader.fieldnames is None or not required.issubset(
                         {h.strip() for h in reader.fieldnames}):
-                    raise ValueError("CSV のヘッダには x,y,period,element,group,dirx,diry が必要です")
-                rows = [{k.strip(): (v.strip() if isinstance(v, str) else v)
-                         for k, v in row.items()} for row in reader]
+                    raise ValueError("CSV のヘッダには x,y,period,element,group が必要です"
+                                     "（dirx,diry は任意）")
+                rows = []
+                for row in reader:
+                    r = {k.strip(): (v.strip() if isinstance(v, str) else v)
+                         for k, v in row.items()}
+                    r.setdefault("dirx", "")
+                    r.setdefault("diry", "")
+                    if r["dirx"] is None:
+                        r["dirx"] = ""
+                    if r["diry"] is None:
+                        r["diry"] = ""
+                    rows.append(r)
         except Exception as exc:  # noqa: BLE001
             self.error(f"CSV を読み込めませんでした: {exc}")
             return
@@ -374,17 +391,31 @@ class App(tb.Window):
         pitch = float(self.pitch_var.get())
         if pitch <= 0:
             raise ValueError("ピッチ P は正の値にしてください")
-        measurements = []
+        raw = []
         for r in self._rows():
             period = float(r["period"])
             if period <= 0:
                 raise ValueError("周期px は正の値にしてください")
-            measurements.append(Measurement(
-                x=float(r["x"]), y=float(r["y"]),
-                resolution=pitch / period,
-                element_id=str(r["element"]), group_id=str(r["group"]),
-                dir_x=float(r["dirx"]), dir_y=float(r["diry"])))
-        return measurements
+            has_dir = str(r["dirx"]).strip() != "" and str(r["diry"]).strip() != ""
+            raw.append({
+                "x": float(r["x"]), "y": float(r["y"]),
+                "resolution": pitch / period,
+                "element_id": str(r["element"]), "group_id": str(r["group"]),
+                "dir_x": float(r["dirx"]) if has_dir else None,
+                "dir_y": float(r["diry"]) if has_dir else None,
+            })
+        try:
+            filled, counts = fill_directions(raw)
+        except InsufficientDataError as exc:
+            raise ValueError(str(exc)) from exc
+        auto = counts["line"] + counts["vanishing_point"]
+        if auto:
+            self.log(f"測定方向を自動計算しました（要素の直線から {counts['line']} 点、"
+                     f"消失点から {counts['vanishing_point']} 点、入力どおり {counts['given']} 点）")
+        return [Measurement(
+            x=f["x"], y=f["y"], resolution=f["resolution"],
+            element_id=f["element_id"], group_id=f["group_id"],
+            dir_x=f["dir_x"], dir_y=f["dir_y"]) for f in filled]
 
     def on_estimate(self, quiet: bool = False) -> None:
         try:

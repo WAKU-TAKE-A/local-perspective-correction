@@ -11,8 +11,58 @@ from lpc.core import (
     InsufficientDataError,
     apply_homography,
     estimate_homography,
+    fill_directions,
 )
 from lpc.simulate import make_scene
+
+
+def _raw_items(scene, keep_dir_for=()):
+    items = []
+    for m in scene.measurements:
+        keep = m.element_id in keep_dir_for
+        items.append({
+            "x": m.x, "y": m.y, "element_id": m.element_id,
+            "group_id": m.group_id,
+            "dir_x": m.dir_x if keep else None,
+            "dir_y": m.dir_y if keep else None,
+        })
+    return items
+
+
+def _assert_dir_matches(filled_item, m):
+    dot = abs(filled_item["dir_x"] * m.dir_x + filled_item["dir_y"] * m.dir_y)
+    assert dot > 0.9999
+
+
+def test_fill_directions_from_element_lines():
+    scene = make_scene(angle_deg=90.0)
+    filled, counts = fill_directions(_raw_items(scene))
+    assert counts["line"] == len(scene.measurements)
+    for f, m in zip(filled, scene.measurements):
+        _assert_dir_matches(f, m)
+
+
+def test_fill_directions_vanishing_point_fallback():
+    scene = make_scene(angle_deg=90.0)
+    items = _raw_items(scene)
+    # Keep only the first point of element A3, with no direction given.
+    a3 = [i for i, m in enumerate(scene.measurements) if m.element_id == "A3"]
+    items = [it for i, it in enumerate(items) if i not in a3[1:]]
+    filled, counts = fill_directions(items)
+    assert counts["vanishing_point"] == 1
+    target = scene.measurements[a3[0]]
+    f = [f for f in filled if f["element_id"] == "A3"][0]
+    dot = abs(f["dir_x"] * target.dir_x + f["dir_y"] * target.dir_y)
+    assert dot > 0.999
+
+
+def test_fill_directions_impossible_for_lone_point():
+    scene = make_scene(angle_deg=90.0)
+    m = scene.measurements[0]
+    items = [{"x": m.x, "y": m.y, "element_id": "A1", "group_id": "A",
+              "dir_x": None, "dir_y": None}]
+    with pytest.raises(InsufficientDataError):
+        fill_directions(items)
 
 
 def _pairwise(P: np.ndarray) -> np.ndarray:
