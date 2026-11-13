@@ -9,9 +9,13 @@ import pytest
 
 from lpc.core import (
     InsufficientDataError,
+    _group_plane_direction,
     apply_homography,
+    canonicalize_orientation,
     estimate_homography,
     fill_directions,
+    jacobian,
+    local_scale,
 )
 from lpc.simulate import make_scene
 
@@ -122,3 +126,44 @@ def test_theta_mismatch_keeps_element_direction_distances():
     # Residuals of the central constraint stay small even for wrong theta:
     # the pitch data alone cannot tell the angles apart.
     assert bad.rms_relative_residual < 0.01
+
+
+def _display_dir(H, measurements, group_id) -> np.ndarray:
+    """Group direction as it appears on screen (the plane's Y is drawn up,
+    the image's Y is down)."""
+    u = _group_plane_direction(H, measurements, group_id)
+    return np.array([u[0], -u[1]])
+
+
+def test_orientation_is_canonicalized():
+    scene = make_scene(angle_deg=90.0)
+    result = estimate_homography(scene.measurements, theta_deg=90.0)
+    dets = [float(np.linalg.det(jacobian(result.H, m.q)))
+            for m in scene.measurements]
+    # Y-down image into a Y-up display: a non-mirrored result has det < 0.
+    assert np.mean(dets) < 0
+    d_a = _display_dir(result.H, scene.measurements, "A")
+    assert d_a @ np.array([0.0, 1.0]) > 0.95  # first group vertical, downward
+    d_b = _display_dir(result.H, scene.measurements, "B")
+    # The second group is horizontal; its arrow sign is a data convention.
+    assert abs(d_b @ np.array([1.0, 0.0])) > 0.85
+
+
+def test_canonicalize_repairs_mirrored_solution():
+    scene = make_scene(angle_deg=90.0)
+    result = estimate_homography(scene.measurements, theta_deg=90.0)
+    H_mirrored = np.diag([-1.0, 1.0, 1.0]) @ result.H
+    # A reflected homography fits exactly the same (mirror ambiguity).
+    for m in scene.measurements:
+        assert local_scale(H_mirrored, m.q, m.t) == pytest.approx(
+            m.resolution, rel=1e-9)
+    H_fixed, corrected = canonicalize_orientation(H_mirrored, scene.measurements)
+    assert corrected
+    dets = [float(np.linalg.det(jacobian(H_fixed, m.q)))
+            for m in scene.measurements]
+    assert np.mean(dets) < 0
+    for m in scene.measurements:
+        assert local_scale(H_fixed, m.q, m.t) == pytest.approx(
+            m.resolution, rel=1e-9)
+    d_a = _display_dir(H_fixed, scene.measurements, "A")
+    assert d_a @ np.array([0.0, 1.0]) > 0.95
